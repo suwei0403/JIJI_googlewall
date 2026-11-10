@@ -543,7 +543,7 @@ header.top{
   var ORDER = ["web", "image", "video", "audio", "link"];
   var AVCOLORS = ["#2B4CF0", "#D9445A", "#128A62", "#6F4BE0", "#C2740F", "#0E7C8B", "#B0356F"];
   var CHUNK = 3 * 1024 * 1024;      // 每段上傳 3 MB
-  var POLL_MS = 20000;              // 每 20 秒抓一次新資料
+  var POLL_MS = 45000;              // 每 45 秒抓一次新資料（一整班同時上線時才不會把伺服器打爆）
 
   var $ = function (s) { return document.querySelector(s); };
   var el = function (t, c) { var n = document.createElement(t); if (c) { n.className = c; } return n; };
@@ -1139,11 +1139,35 @@ header.top{
   });
 
   /* ================= 預覽 ================= */
+  /* 作品的程式碼不會變，存在這台電腦裡，之後開同一件就不必再跟伺服器要 */
   var codeCache = {};
+  function localCode(fileId) {
+    try { return localStorage.getItem("wall.code." + fileId); } catch (e) { return null; }
+  }
+  function keepCode(fileId, code) {
+    try {
+      if (code && code.length < 400000) { localStorage.setItem("wall.code." + fileId, code); }
+    } catch (e) {
+      try {                       // 空間滿了就把舊的清掉再存一次
+        Object.keys(localStorage).forEach(function (k) {
+          if (k.indexOf("wall.code.") === 0) { localStorage.removeItem(k); }
+        });
+        localStorage.setItem("wall.code." + fileId, code);
+      } catch (e2) { /* 存不了就算了，下次再跟伺服器要 */ }
+    }
+  }
   function getCode(w) {
     if (!codeCache[w.id]) {
-      codeCache[w.id] = api("getCode", w.fileId);
-      codeCache[w.id].catch(function () { delete codeCache[w.id]; });
+      var saved = localCode(w.fileId);
+      if (saved) {
+        codeCache[w.id] = Promise.resolve(saved);
+      } else {
+        codeCache[w.id] = api("getCode", w.fileId).then(function (code) {
+          keepCode(w.fileId, code);
+          return code;
+        });
+        codeCache[w.id].catch(function () { delete codeCache[w.id]; });
+      }
     }
     return codeCache[w.id];
   }
@@ -2007,9 +2031,23 @@ header.top{
     $("#offline").hidden = false;
   });
 
-  setInterval(function () {
-    if (!busy && !document.hidden && view) { reload(); }
-  }, POLL_MS);
+  /* 有人正在玩作品時不打擾；伺服器出問題就逐步拉長間隔，不要一直重試 */
+  var pollEvery = POLL_MS, pollFails = 0;
+  (function schedulePoll() {
+    setTimeout(function () {
+      if (busy || document.hidden || openId || !view) {
+        schedulePoll();
+        return;
+      }
+      reload().then(function () {
+        pollFails = 0;
+        pollEvery = POLL_MS;
+      }).catch(function () {
+        pollFails++;
+        pollEvery = Math.min(POLL_MS * Math.pow(2, pollFails), 5 * 60000);
+      }).then(schedulePoll);
+    }, pollEvery);
+  }());
 }());
 </script>
 
